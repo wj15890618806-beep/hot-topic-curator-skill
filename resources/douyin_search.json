@@ -1,0 +1,19 @@
+{
+  "keywords": [
+    "企业贷款",
+    "小微企业贷款",
+    "银行贷款",
+    "商户贷",
+    "经营贷",
+    "企业融资"
+  ],
+  "days": 7,
+  "pages_per_keyword": 1,
+  "thresholds": {
+    "likes": 5000,
+    "comments": 500,
+    "shares": 500,
+    "plays": 50000
+  },
+  "max_results": 30
+}

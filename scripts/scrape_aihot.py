@@ -35,25 +35,7 @@ def save_content_cache():
     except Exception as e:
         print(f"Error saving content cache: {e}")
 
-# AI Backend Configuration
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AI_API_KEY_FILE = os.path.join(PROJECT_DIR, ".config", "openrouter_api_key.txt")
-
-def load_ai_api_key():
-    try:
-        with open(AI_API_KEY_FILE, 'r', encoding='utf-8') as f:
-            key = f.read().strip()
-    except FileNotFoundError:
-        return ""
-
-    if key == "PASTE_OPENROUTER_API_KEY_HERE":
-        return ""
-    return key
-
-AI_API_KEY = load_ai_api_key()
-AI_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
-AI_MODEL_NAME = "google/gemini-3-flash-preview"
-#AI_MODEL_NAME = "google/gemini-3-pro-preview" 
 
 # Global Headers
 HEADERS = {
@@ -62,11 +44,11 @@ HEADERS = {
 
 # Feature Flags
 ENABLE_RSS = os.getenv('ENABLE_RSS', 'true').lower() == 'true'
+ENABLE_AIHOT_HOME = os.getenv('ENABLE_AIHOT_HOME', 'false').lower() == 'true'
 RSS_CONFIG_REL_PATH = "../resources/content_curator_sources.json"
-MAX_LOOKBACK_DAYS = 60
-GENERAL_LOOKBACK_DAYS = 45
+MAX_LOOKBACK_DAYS = 45
 RECENT_PRIORITY_DAYS = 7
-SELECTION_COUNT = 5
+SELECTION_COUNT = 8
 
 def truncate_text(text, max_len=800):
     if not text:
@@ -189,9 +171,9 @@ def fetch_single_rss_source(url, category):
             # Extract date
             published_date = None
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                    published_date = datetime.fromtimestamp(time.mktime(entry.published_parsed))
+                    published_date = datetime(*entry.published_parsed[:6])
             elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                    published_date = datetime.fromtimestamp(time.mktime(entry.updated_parsed))
+                    published_date = datetime(*entry.updated_parsed[:6])
             
             date_str = published_date.strftime('%Y-%m-%d') if published_date else ""
 
@@ -260,6 +242,8 @@ def download_article_html(url):
     with requests.get(url, headers=HEADERS, timeout=(5, 10), stream=True) as response:
         response.raise_for_status()
         encoding = response.encoding or 'utf-8'
+        if encoding.lower() in {'iso-8859-1', 'latin-1'}:
+            encoding = response.apparent_encoding or 'utf-8'
 
         for chunk in response.iter_content(chunk_size=64 * 1024):
             if time.monotonic() > deadline:
@@ -593,10 +577,98 @@ def call_ai_selection(items, top_n=SELECTION_COUNT):
             print(f"Response body: {response.text}")
         return []
 
+
+TOPIC_WEIGHTS = {
+    "企业": 8, "小微": 10, "商户": 10, "老板": 8, "门店": 10,
+    "餐饮": 10, "零售": 10, "消费": 8, "支付": 9, "贷款": 10,
+    "融资": 10, "银行": 7, "利率": 8, "税": 8, "经营": 9,
+    "成本": 8, "营收": 8, "利润": 8, "现金流": 10, "加盟": 8,
+    "供应链": 8, "价格": 6, "就业": 5, "采购经理": 8, "PMI": 8,
+    "政策": 6, "财政": 6, "风险": 7, "增长": 5, "下降": 5,
+}
+
+SOURCE_WEIGHTS = {
+    "国家统计局最新发布 (RSS)": 18,
+    "国家统计局数据解读 (RSS)": 20,
+    "钛媒体商业财经 (RSS)": 14,
+    "第一财经商业播客 (RSS)": 12,
+}
+
+PROMOTIONAL_TERMS = ("评选落幕", "圆满落幕", "品牌评选", "喜获", "荣获")
+MAX_PER_SOURCE = 4
+
+
+def title_tokens(title):
+    cleaned = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", title or "")
+    return {cleaned[index:index + 2] for index in range(max(0, len(cleaned) - 1))}
+
+
+def is_duplicate_title(title, selected_titles):
+    current = title_tokens(title)
+    if not current:
+        return True
+    for selected in selected_titles:
+        previous = title_tokens(selected)
+        union = current | previous
+        if union and len(current & previous) / len(union) >= 0.55:
+            return True
+    return False
+
+
+def local_selection(items, top_n=SELECTION_COUNT):
+    """使用可解释的本地规则筛选中文企业经营选题。"""
+    ranked = []
+    now = datetime.now()
+
+    for item in items:
+        title = item.get("title", "")
+        if not re.search(r"[\u4e00-\u9fff]", title):
+            continue
+        if any(term in title for term in PROMOTIONAL_TERMS):
+            continue
+
+        text = f"{title} {item.get('description', '')} {item.get('content', '')}"
+        matched = [term for term in TOPIC_WEIGHTS if term.lower() in text.lower()]
+        relevance_score = sum(TOPIC_WEIGHTS[term] for term in matched)
+
+        published = parse_date_string(item.get("article_date", ""))
+        age_days = max(0, (now - published).days) if published else MAX_LOOKBACK_DAYS
+        recency_score = max(0, 30 - age_days)
+        content_score = min(15, len(item.get("content", "")) // 80)
+        source_score = SOURCE_WEIGHTS.get(item.get("platform", ""), 8)
+        item["selection_score"] = relevance_score + recency_score + content_score + source_score
+        item["matched_topics"] = matched
+        ranked.append(item)
+
+    ranked.sort(key=lambda item: (item["selection_score"], item.get("article_date", "")), reverse=True)
+
+    selected = []
+    selected_titles = []
+    source_counts = {}
+    for item in ranked:
+        if len(selected) >= top_n:
+            break
+        if is_duplicate_title(item.get("title", ""), selected_titles):
+            continue
+        platform = item.get("platform", "")
+        if source_counts.get(platform, 0) >= MAX_PER_SOURCE:
+            continue
+
+        topics = item.get("matched_topics", [])[:4]
+        topic_text = "、".join(topics) if topics else "企业经营环境"
+        selected.append({
+            "id": item["id"],
+            "title_zh": item["title"],
+            "reason": f"涉及{topic_text}，信息较新且具备企业主决策价值。",
+        })
+        selected_titles.append(item["title"])
+        source_counts[platform] = source_counts.get(platform, 0) + 1
+
+    print(f"本地规则从 {len(items)} 条候选中选出 {len(selected)} 条。")
+    return selected
+
+
 def scrape_aihot():
-    if not AI_API_KEY:
-        print(f"OpenRouter API Key 未配置，请填写：{AI_API_KEY_FILE}")
-        return
 
     url = 'https://aihot.today/'
     headers = {
@@ -618,13 +690,15 @@ def scrape_aihot():
         # Try to load from cache first to save traffic
         # Removed old file-based full list cache logic as requested.
         
-        print(f"Fetching {url}...")
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        response.encoding = 'utf-8'
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        cards = soup.find_all('div', class_=lambda c: c and 'bg-card' in c and 'text-card-foreground' in c)
+        if ENABLE_AIHOT_HOME:
+            print(f"Fetching {url}...")
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            response.encoding = 'utf-8'
+            soup = BeautifulSoup(response.text, 'html.parser')
+            cards = soup.find_all('div', class_=lambda c: c and 'bg-card' in c and 'text-card-foreground' in c)
+        else:
+            cards = []
         
         all_items_to_fetch = []
         
@@ -808,10 +882,10 @@ def scrape_aihot():
 
         # AI Selection
         if valid_items:
-            selected_results = call_ai_selection(valid_items, top_n=SELECTION_COUNT)
+            selected_results = local_selection(valid_items, top_n=SELECTION_COUNT)
             
             if selected_results:
-                print(f"AI selected {len(selected_results)} items total.")
+                print(f"本地规则已选出 {len(selected_results)} 条选题。")
                 item_map = {item['id']: item for item in valid_items}
                 
                 final_selection = []

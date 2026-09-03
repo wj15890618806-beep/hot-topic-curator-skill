@@ -33,3 +33,13 @@
 - 文件改动完成后，必须在同一任务内提交并推送到当前远程分支。
 - `push` 失败时不得宣称任务完成；应说明失败原因并继续处理。
 - 交付时必须报告分支名和提交哈希，便于核验。
+
+# 三端同步
+
+每次改动必须同步以下三端：
+
+- 本地仓库：`C:\Users\Administrator\Desktop\自媒体skill\热点选题skill`
+- GitHub：当前 `origin` 远程分支
+- Codex：`C:\Users\Administrator\.codex\skills\ai-hot-content-curator`
+
+同步范围为整个仓库，但不复制 `.git` 元数据、忽略文件及本地缓存。交付前必须确认三端受 Git 管理文件一致。

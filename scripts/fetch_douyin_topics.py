@@ -96,8 +96,14 @@ def fetch_keyword(session, api_key, keyword, pages):
             json=body,
             timeout=45,
         )
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            payload = response.json()
+        except requests.JSONDecodeError:
+            payload = {}
+        if not response.ok:
+            detail = payload.get("detail") if isinstance(payload, dict) else None
+            message = detail.get("message_zh") if isinstance(detail, dict) else ""
+            raise RuntimeError(f"TikHub 请求失败（HTTP {response.status_code}）：{message or '请检查令牌和接口权限'}")
         if payload.get("code") not in (None, 0, 200):
             raise RuntimeError(payload.get("message") or payload.get("detail") or "TikHub 返回错误")
         results.extend(find_videos(payload))
@@ -148,16 +154,20 @@ def main():
     thresholds = config["thresholds"]
     cutoff = datetime.now().astimezone() - timedelta(days=int(config["days"]))
     deduplicated = {}
-    with requests.Session() as session:
-        for keyword in config["keywords"]:
-            print(f"检索：{keyword}")
-            for raw in fetch_keyword(session, api_key, keyword, int(config["pages_per_keyword"])):
-                item = normalize_video(raw, keyword)
-                published = datetime.fromisoformat(item["published_at"]) if item["published_at"] else None
-                if published and published >= cutoff and passes_thresholds(item, thresholds):
-                    previous = deduplicated.get(item["aweme_id"])
-                    if previous is None or score(item, thresholds) > score(previous, thresholds):
-                        deduplicated[item["aweme_id"]] = item
+    try:
+        with requests.Session() as session:
+            for keyword in config["keywords"]:
+                print(f"检索：{keyword}")
+                for raw in fetch_keyword(session, api_key, keyword, int(config["pages_per_keyword"])):
+                    item = normalize_video(raw, keyword)
+                    published = datetime.fromisoformat(item["published_at"]) if item["published_at"] else None
+                    if published and published >= cutoff and passes_thresholds(item, thresholds):
+                        previous = deduplicated.get(item["aweme_id"])
+                        if previous is None or score(item, thresholds) > score(previous, thresholds):
+                            deduplicated[item["aweme_id"]] = item
+    except (requests.RequestException, RuntimeError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
     items = sorted(deduplicated.values(), key=lambda item: score(item, thresholds), reverse=True)
     items = items[: int(config["max_results"])]
     json_path, html_path = save_report(items)

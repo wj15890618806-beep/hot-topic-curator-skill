@@ -1,0 +1,19 @@
+{
+  "keywords": [
+    "营业执照",
+    "营业执照价值",
+    "营业执照贷款",
+    "营业执照融资",
+    "营业执照能贷多少",
+    "一张营业执照"
+  ],
+  "days": 365,
+  "pages_per_keyword": 3,
+  "thresholds": {
+    "likes": 5000,
+    "comments": 500,
+    "shares": 500,
+    "plays": 50000
+  },
+  "max_results": 50
+}

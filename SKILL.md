@@ -9,6 +9,7 @@ description: 从纯中文权威、财经、实体经营信源及抖音高曝光�
 
 - 中文网站与 RSS：运行 `python scripts/scrape_aihot.py`。
 - 抖音财经贷款爆款：设置进程环境变量 `TIKHUB_API_KEY`，运行 `python scripts/fetch_douyin_topics.py`。
+- 指定专题配置：运行 `python scripts/fetch_douyin_topics.py --config resources/<配置文件>.json`。
 
 ## 硬性边界
 

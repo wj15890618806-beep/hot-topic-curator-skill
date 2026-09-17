@@ -1,3 +1,4 @@
+import argparse
 import html
 import json
 import os
@@ -10,12 +11,18 @@ import requests
 
 API_URL = "https://api.tikhub.io/api/v1/douyin/search/fetch_video_search_v2"
 ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = ROOT / "resources" / "douyin_search.json"
+DEFAULT_CONFIG_PATH = ROOT / "resources" / "douyin_search.json"
 
 
-def load_config():
-    with CONFIG_PATH.open(encoding="utf-8") as file:
+def load_config(config_path):
+    with config_path.open(encoding="utf-8") as file:
         return json.load(file)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="抓取抖音中文财经爆款视频")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    return parser.parse_args()
 
 
 def iter_dicts(value):
@@ -77,7 +84,7 @@ def passes_thresholds(item, thresholds):
     return any(item[name] >= int(limit) for name, limit in thresholds.items())
 
 
-def fetch_keyword(session, api_key, keyword, pages):
+def fetch_keyword(session, api_key, keyword, pages, publish_time):
     results = []
     cursor = 0
     search_id = ""
@@ -85,8 +92,8 @@ def fetch_keyword(session, api_key, keyword, pages):
         body = {
             "keyword": keyword,
             "cursor": cursor,
-            "sort_type": 1,
-            "publish_time": 7,
+            "sort_type": "1",
+            "publish_time": publish_time,
         }
         if search_id:
             body["search_id"] = search_id
@@ -108,9 +115,11 @@ def fetch_keyword(session, api_key, keyword, pages):
             raise RuntimeError(payload.get("message") or payload.get("detail") or "TikHub 返回错误")
         results.extend(find_videos(payload))
         data = payload.get("data") or {}
-        cursor = data.get("cursor") or data.get("max_cursor") or 0
-        search_id = data.get("search_id") or search_id
-        if not data.get("has_more"):
+        business_config = data.get("business_config") or {}
+        next_page = business_config.get("next_page") or {}
+        cursor = next_page.get("cursor") or 0
+        search_id = next_page.get("search_id") or search_id
+        if not business_config.get("has_more") or not cursor:
             break
     return results
 
@@ -119,7 +128,7 @@ def score(item, thresholds):
     return max(item[name] / max(1, int(limit)) for name, limit in thresholds.items())
 
 
-def save_report(items):
+def save_report(items, days):
     output_dir = ROOT / "topics" / datetime.now().strftime("%Y-%m-%d-%H%M%S")
     output_dir.mkdir(parents=True, exist_ok=False)
     json_path = output_dir / "douyin_selected.json"
@@ -137,7 +146,7 @@ def save_report(items):
         "<!doctype html><meta charset=\"utf-8\"><title>抖音财经贷款爆款</title>"
         "<style>body{font:14px sans-serif;margin:32px}table{border-collapse:collapse;width:100%}"
         "th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background:#f5f5f5}</style>"
-        "<h1>近7天抖音财经贷款爆款</h1><table><thead><tr><th>视频</th><th>账号</th>"
+        f"<h1>近{days}天抖音财经贷款爆款</h1><table><thead><tr><th>视频</th><th>账号</th>"
         "<th>点赞</th><th>评论</th><th>转发</th><th>播放</th><th>发布时间</th></tr></thead>"
         f"<tbody>{rows}</tbody></table>",
         encoding="utf-8",
@@ -146,19 +155,29 @@ def save_report(items):
 
 
 def main():
+    args = parse_args()
     api_key = os.getenv("TIKHUB_API_KEY", "").strip()
     if not api_key:
         print("缺少环境变量 TIKHUB_API_KEY。", file=sys.stderr)
         return 2
-    config = load_config()
+    config_path = args.config if args.config.is_absolute() else ROOT / args.config
+    config = load_config(config_path)
     thresholds = config["thresholds"]
-    cutoff = datetime.now().astimezone() - timedelta(days=int(config["days"]))
+    days = int(config["days"])
+    cutoff = datetime.now().astimezone() - timedelta(days=days)
+    publish_time = "1" if days <= 1 else "7" if days <= 7 else "180" if days <= 180 else "0"
     deduplicated = {}
     try:
         with requests.Session() as session:
             for keyword in config["keywords"]:
                 print(f"检索：{keyword}")
-                for raw in fetch_keyword(session, api_key, keyword, int(config["pages_per_keyword"])):
+                for raw in fetch_keyword(
+                    session,
+                    api_key,
+                    keyword,
+                    int(config["pages_per_keyword"]),
+                    publish_time,
+                ):
                     item = normalize_video(raw, keyword)
                     published = datetime.fromisoformat(item["published_at"]) if item["published_at"] else None
                     if published and published >= cutoff and passes_thresholds(item, thresholds):
@@ -170,7 +189,7 @@ def main():
         return 1
     items = sorted(deduplicated.values(), key=lambda item: score(item, thresholds), reverse=True)
     items = items[: int(config["max_results"])]
-    json_path, html_path = save_report(items)
+    json_path, html_path = save_report(items, days)
     print(f"命中 {len(items)} 条。")
     print(json_path)
     print(html_path)

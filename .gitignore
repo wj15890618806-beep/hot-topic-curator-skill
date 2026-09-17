@@ -1,5 +1,6 @@
 .venv/
 __pycache__/
+local/
 .env
 *.env
 .config/openrouter_api_key.txt
